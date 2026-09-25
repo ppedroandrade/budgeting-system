@@ -1,0 +1,45 @@
+/*
+ * Design tokens — Arte Decor Revest
+ *
+ * STATUS: PROPOSTA PROVISÓRIA (aguardando aprovação).
+ * O site artedecorrevest.com.br não pôde ser acessado deste ambiente, então
+ * as cores e fontes abaixo foram derivadas da logo e do estilo descrito
+ * (premium, minimalista, editorial). Serão substituídas pelos valores reais
+ * do site assim que o acesso for liberado ou os prints forem enviados.
+ */
+:root {
+  /* Cores */
+  --ad-bg: #f7f4ef;            /* fundo geral: off-white quente */
+  --ad-surface: #ffffff;       /* cartões, campos */
+  --ad-ink: #282624;           /* texto principal (mesmo tom da logo escura) */
+  --ad-ink-soft: #6f6a63;      /* texto secundário, legendas */
+  --ad-line: #e6e0d7;          /* bordas e divisórias */
+  --ad-accent: #9a7b55;        /* bronze: destaques, links, itálicos */
+  --ad-accent-ink: #ffffff;    /* texto sobre o bronze */
+  --ad-dark: #1f1d1b;          /* botão principal, rodapé */
+  --ad-success: #4f6b4a;       /* Aprovado */
+  --ad-warning: #b07a2a;       /* Enviado / atenção */
+  --ad-danger: #a23b2a;        /* Perdido / Vencido / erros */
+
+  /* Tipografia */
+  --ad-font-display: "Cormorant Garamond", Georgia, serif; /* títulos editoriais */
+  --ad-font-sans: "Jost", "Helvetica Neue", Arial, sans-serif; /* interface (geométrica, como a logo) */
+  --ad-tracking-caps: 0.28em;  /* rótulos em CAIXA ALTA espaçada, como "R E V E S T" */
+
+  /* Tamanhos (mobile-first) */
+  --ad-text-sm: 0.875rem;
+  --ad-text-base: 1rem;
+  --ad-text-lg: 1.125rem;
+  --ad-text-title: 2rem;
+  --ad-text-hero: 2.75rem;
+
+  /* Forma */
+  --ad-radius-sm: 2px;         /* campos */
+  --ad-radius: 4px;            /* botões, cartões — quase reto, visual editorial */
+  --ad-shadow: 0 1px 2px rgb(40 38 36 / 0.04), 0 8px 24px rgb(40 38 36 / 0.06);
+
+  /* Espaçamento e toque */
+  --ad-space: 1rem;
+  --ad-space-lg: 2.5rem;
+  --ad-tap: 48px;              /* altura mínima de botões e campos (dedo no celular) */
+}
