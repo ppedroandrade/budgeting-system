@@ -249,6 +249,139 @@ d("banco de dados", () => {
   });
 });
 
+d("salvar orçamento (RPC usada pelo salvamento automático)", () => {
+  let db: Client;
+  beforeAll(async () => {
+    db = new Client({ connectionString: url });
+    await db.connect();
+  });
+  afterAll(async () => db?.end());
+  beforeEach(async () => db.query("begin"));
+  afterEach(async () => db.query("rollback"));
+
+  async function login(nome: string, perfil = "vendedor") {
+    const id = randomUUID();
+    await db.query("reset role");
+    await db.query("insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data) values ($1,$2,$3,$4)",
+      [id, `${nome}-${id.slice(0, 6)}@t.com`, { nome, whatsapp: "45999990000" }, { perfil }]);
+    return id;
+  }
+  async function como(id: string) {
+    await db.query("reset role");
+    await db.query("set local role authenticated");
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id })]);
+  }
+  const item = (preco: string, qtd = "1", extra: Record<string, unknown> = {}) =>
+    ({ id: randomUUID(), nome: "Produto", marca: "Docol", preco_base: preco, qtd, pct: "20", unidade: "un", ambiente: "Cozinha", ...extra });
+  async function salvar(p: unknown) {
+    const { rows } = await db.query("select salvar_orcamento($1) as r", [p]);
+    return rows[0].r;
+  }
+
+  it("cria orçamento, cliente e itens de uma vez; depois atualiza, reordena e remove", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    const a = item("494.80"), b = item("1221.60", "4");
+    const r1 = await salvar({ cliente: { nome: "Ali", telefone: "45 99999-1111" }, arquiteto: "Mayara", itens: [a, b] });
+    expect(r1.numero).toMatch(/^\d{4}-\d{4}$/);
+    expect(r1.total_prazo).toBe(5381.2);
+    expect(r1.itens.map((i: { id: string }) => i.id)).toEqual([a.id, b.id]);
+
+    const r2 = await salvar({ id: r1.id, cliente: { id: r1.cliente_id, nome: "Ali Hassan" }, itens: [b], desconto: "100", motivo_desconto: "Fidelidade" });
+    expect(r2.numero).toBe(r1.numero);
+    expect(r2.itens).toHaveLength(1);
+    expect(r2.total_prazo).toBe(4786.4); // 4886,40 − 100
+    const { rows: [c] } = await db.query("select nome from clientes where id = $1", [r1.cliente_id]);
+    expect(c.nome).toBe("Ali Hassan");
+    const { rows: [o] } = await db.query("select snapshot_cliente, snapshot_consultor from orcamentos where id = $1", [r1.id]);
+    expect(o.snapshot_cliente.nome).toBe("Ali Hassan");
+    expect(o.snapshot_consultor.nome).toBe("Fabiano");
+  });
+
+  it("remover item que deixaria o desconto maior que o subtotal é bloqueado", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    const a = item("100.00"), b = item("100.00");
+    const r = await salvar({ itens: [a, b], desconto: "150" });
+    await db.query("savepoint s");
+    await expect(salvar({ id: r.id, itens: [a], desconto: "150" })).rejects.toThrow(/maior que o subtotal/);
+    await db.query("rollback to savepoint s");
+    expect((await salvar({ id: r.id, itens: [a], desconto: "50" })).total_vista).toBe(30);
+  });
+
+  it("vendedor não consegue puxar cliente de outro vendedor pelo id", async () => {
+    const ana = await login("Ana"), fab = await login("Fabiano");
+    await como(ana);
+    const { rows: [cli] } = await db.query("insert into clientes (nome, telefone) values ('Segredo', '1') returning id");
+    await como(fab);
+    const r = await salvar({ cliente: { id: cli.id, nome: "Outro" }, itens: [] });
+    expect(r.cliente_id).not.toBe(cli.id); // virou um cliente novo do Fabiano
+    await como(ana);
+    const { rows: [c] } = await db.query("select nome from clientes where id = $1", [cli.id]);
+    expect(c.nome).toBe("Segredo");
+  });
+
+  it("vendedor não salva orçamento de outro vendedor nem se passa por ele", async () => {
+    const ana = await login("Ana"), fab = await login("Fabiano");
+    await como(ana);
+    const r = await salvar({ itens: [item("10.00")] });
+    await como(fab);
+    await db.query("savepoint s");
+    await expect(salvar({ id: r.id, itens: [] })).rejects.toThrow(/não encontrado/);
+    await db.query("rollback to savepoint s");
+    await expect(salvar({ vendedor_id: ana, itens: [] })).rejects.toThrow(/row-level security/);
+  });
+
+  it("dados da empresa congelam ao marcar Enviado; duplicar gera novo número em Rascunho", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    const r = await salvar({ itens: [item("100.00")], desconto: "10" });
+    expect(await db.query("select marcar_enviado($1) as s", [r.id]).then((x) => x.rows[0].s)).toBe("enviado");
+
+    await db.query("reset role");
+    await db.query("update empresa set telefone = '(45) 0000-0000'");
+    await como(fab);
+    await salvar({ id: r.id, status: "enviado", itens: [item("100.00")], desconto: "10" });
+    const { rows: [o] } = await db.query("select snapshot_empresa from orcamentos where id = $1", [r.id]);
+    expect(o.snapshot_empresa.telefone).toBe("(45) 3198-1111");
+
+    const { rows: [d] } = await db.query("select duplicar_orcamento($1) as id", [r.id]);
+    const { rows: [n] } = await db.query("select numero, status, desconto, total_vista, snapshot_empresa from orcamentos where id = $1", [d.id]);
+    expect(n.numero).not.toBe(r.numero);
+    expect(n).toMatchObject({ status: "rascunho", desconto: "10.00", total_vista: "70.00" });
+    expect(n.snapshot_empresa.telefone).toBe("(45) 0000-0000");
+  });
+
+  it("validade antes da data é recusada", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    await expect(salvar({ validade: "2000-01-01", itens: [] })).rejects.toThrow(/validade não pode/);
+  });
+
+  it("busca sem acento em produtos e clientes", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    await db.query("insert into produtos (marca, nome, referencia) values ('Portobello', 'Cerâmica Acetinada', 'PB-01')");
+    const { rowCount } = await db.query("select 1 from produtos where busca like '%' || sem_acento('ceramica acetinada') || '%'");
+    expect(rowCount).toBe(1);
+    await db.query("insert into clientes (nome) values ('João Conceição')");
+    expect((await db.query("select 1 from clientes where busca like '%conceicao%'")).rowCount).toBe(1);
+  });
+
+  it("upload: vendedor envia foto de produto mas não a logo; admin envia a logo", async () => {
+    const adm = await login("Admin", "admin"), fab = await login("Fabiano");
+    await db.query("reset role");
+    await db.query("update usuarios set perfil = 'admin' where id = $1", [adm]);
+    await como(fab);
+    await db.query("insert into storage.objects (bucket_id, name) values ('arquivos', 'produtos/a.jpg')");
+    await db.query("savepoint s");
+    await expect(db.query("insert into storage.objects (bucket_id, name) values ('arquivos', 'empresa/logo.png')")).rejects.toThrow(/row-level security/);
+    await db.query("rollback to savepoint s");
+    await como(adm);
+    await db.query("insert into storage.objects (bucket_id, name) values ('arquivos', 'empresa/logo.png')");
+  });
+});
+
 d("numeração simultânea", () => {
   it("dois vendedores salvando ao mesmo tempo recebem números diferentes e seguidos", async () => {
     const [c1, c2, adm] = [new Client({ connectionString: url }), new Client({ connectionString: url }), new Client({ connectionString: url })];

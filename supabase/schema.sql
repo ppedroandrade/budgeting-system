@@ -453,6 +453,225 @@ language sql stable security invoker set search_path = public as $$
   order by 6 desc, u.nome
 $$;
 
+-- ---------------------------------------------------------------------
+-- Busca sem acento ("ceramica" acha "Cerâmica")
+-- ---------------------------------------------------------------------
+create or replace function public.sem_acento(t text)
+returns text language sql immutable parallel safe as $$
+  select translate(lower(coalesce(t, '')),
+    'áàâãäåéèêëíìîïóòôõöúùûüçñ', 'aaaaaaeeeeiiiiooooouuuucn')
+$$;
+
+alter table public.produtos add column busca text
+  generated always as (public.sem_acento(marca || ' ' || nome || ' ' || referencia || ' ' || acabamento)) stored;
+alter table public.clientes add column busca text
+  generated always as (public.sem_acento(nome || ' ' || coalesce(cpf_cnpj, '') || ' ' || coalesce(telefone, '') || ' ' || coalesce(email, ''))) stored;
+
+-- ---------------------------------------------------------------------
+-- Cópias congeladas (snapshots) usadas no PDF
+-- ---------------------------------------------------------------------
+create or replace function public.empresa_snapshot()
+returns jsonb language sql stable security definer set search_path = public as $$
+  select to_jsonb(e) - 'id' - 'atualizado_em' from empresa e where id = 1
+$$;
+
+create or replace function public.consultor_snapshot(p_usuario uuid)
+returns jsonb language sql stable security definer set search_path = public as $$
+  select jsonb_build_object('nome', nome, 'whatsapp', whatsapp, 'email', email) from usuarios where id = p_usuario
+$$;
+
+-- ---------------------------------------------------------------------
+-- Salvar o orçamento inteiro de uma vez (usado pelo salvamento automático).
+-- Roda com as permissões de quem chamou (RLS vale normalmente).
+-- ---------------------------------------------------------------------
+create or replace function public.salvar_orcamento(p jsonb)
+returns jsonb language plpgsql security invoker set search_path = public as $$
+declare
+  v_id          uuid := nullif(p ->> 'id', '')::uuid;
+  v_cli         jsonb := p -> 'cliente';
+  v_cli_id      uuid;
+  v_vendedor    uuid := coalesce(nullif(p ->> 'vendedor_id', '')::uuid, auth.uid());
+  v_status_ant  text;
+  v_data        date;
+  v_validade    date := nullif(p ->> 'validade', '')::date;
+  v_ids         uuid[];
+begin
+  if not usuario_ativo() then
+    raise exception 'Seu acesso está desativado.' using errcode = 'insufficient_privilege';
+  end if;
+
+  -- 1) Cliente: atualiza o existente (se a pessoa pode ver) ou cria um novo.
+  if v_cli is not null and length(trim(coalesce(v_cli ->> 'nome', ''))) > 0 then
+    v_cli_id := nullif(v_cli ->> 'id', '')::uuid;
+    if v_cli_id is not null and not exists (select 1 from clientes where id = v_cli_id) then
+      v_cli_id := null; -- id de cliente que o vendedor não enxerga: trata como novo
+    end if;
+    if v_cli_id is null then
+      insert into clientes (nome, cpf_cnpj, telefone, email, endereco)
+      values (trim(v_cli ->> 'nome'), nullif(trim(v_cli ->> 'cpf_cnpj'), ''), nullif(trim(v_cli ->> 'telefone'), ''),
+              nullif(trim(v_cli ->> 'email'), ''), nullif(trim(v_cli ->> 'endereco'), ''))
+      returning id into v_cli_id;
+    else
+      update clientes set
+        nome = trim(v_cli ->> 'nome'),
+        cpf_cnpj = nullif(trim(v_cli ->> 'cpf_cnpj'), ''),
+        telefone = nullif(trim(v_cli ->> 'telefone'), ''),
+        email = nullif(trim(v_cli ->> 'email'), ''),
+        endereco = nullif(trim(v_cli ->> 'endereco'), '')
+      where id = v_cli_id; -- sem permissão de edição: 0 linhas, sem erro
+    end if;
+  end if;
+
+  -- 2) Cria o orçamento (ganha número) ou zera ajustes para reprocessar os itens.
+  if v_id is null then
+    insert into orcamentos (cliente_id, vendedor_id, validade)
+    values (v_cli_id, v_vendedor, v_validade)
+    returning id, status into v_id, v_status_ant;
+  else
+    select status into v_status_ant from orcamentos where id = v_id;
+    if not found then
+      raise exception 'Orçamento não encontrado.' using errcode = 'P0002';
+    end if;
+    update orcamentos set desconto = 0, acrescimo = 0 where id = v_id;
+  end if;
+
+  -- 3) Itens: apaga os removidos e grava os demais na ordem da tela.
+  select coalesce(array_agg((i ->> 'id')::uuid), '{}') into v_ids
+    from jsonb_array_elements(coalesce(p -> 'itens', '[]')) i;
+  delete from orcamento_itens where orcamento_id = v_id and not (id = any (v_ids));
+
+  insert into orcamento_itens as it
+    (id, orcamento_id, ordem, produto_id, marca, nome, referencia, acabamento, unidade, foto_url, ambiente, qtd, preco_base, pct)
+  select (i ->> 'id')::uuid, v_id, (ord - 1)::int, nullif(i ->> 'produto_id', '')::uuid,
+         coalesce(i ->> 'marca', ''), coalesce(i ->> 'nome', ''), coalesce(i ->> 'referencia', ''),
+         coalesce(i ->> 'acabamento', ''), coalesce(nullif(i ->> 'unidade', ''), 'un'), nullif(i ->> 'foto_url', ''),
+         trim(coalesce(i ->> 'ambiente', '')), (i ->> 'qtd')::numeric, (i ->> 'preco_base')::numeric, (i ->> 'pct')::numeric
+  from jsonb_array_elements(coalesce(p -> 'itens', '[]')) with ordinality as t(i, ord)
+  on conflict (id) do update set
+    ordem = excluded.ordem, produto_id = excluded.produto_id, marca = excluded.marca, nome = excluded.nome,
+    referencia = excluded.referencia, acabamento = excluded.acabamento, unidade = excluded.unidade,
+    foto_url = excluded.foto_url, ambiente = excluded.ambiente, qtd = excluded.qtd,
+    preco_base = excluded.preco_base, pct = excluded.pct
+  where it.orcamento_id = excluded.orcamento_id;
+
+  -- 4) Cabeçalho, ajustes e cópias para o PDF.
+  select data into v_data from orcamentos where id = v_id;
+  if v_validade is not null and v_validade < v_data then
+    raise exception 'A validade não pode ser antes da data do orçamento.' using errcode = 'check_violation';
+  end if;
+
+  update orcamentos o set
+    cliente_id       = v_cli_id,
+    vendedor_id      = v_vendedor,
+    arquiteto        = trim(coalesce(p ->> 'arquiteto', '')),
+    validade         = coalesce(v_validade, o.validade),
+    status           = coalesce(nullif(p ->> 'status', ''), o.status),
+    desconto         = coalesce((p ->> 'desconto')::numeric, 0),
+    motivo_desconto  = trim(coalesce(p ->> 'motivo_desconto', '')),
+    acrescimo        = coalesce((p ->> 'acrescimo')::numeric, 0),
+    motivo_acrescimo = trim(coalesce(p ->> 'motivo_acrescimo', '')),
+    formas_pagamento = coalesce(array(select jsonb_array_elements_text(p -> 'formas_pagamento')), '{}'),
+    forma_outro      = trim(coalesce(p ->> 'forma_outro', '')),
+    condicoes        = coalesce(p ->> 'condicoes', ''),
+    observacoes      = coalesce(p ->> 'observacoes', ''),
+    snapshot_cliente = case when v_cli_id is null then null else jsonb_build_object(
+                         'nome', trim(v_cli ->> 'nome'), 'cpf_cnpj', trim(coalesce(v_cli ->> 'cpf_cnpj', '')),
+                         'telefone', trim(coalesce(v_cli ->> 'telefone', '')), 'email', trim(coalesce(v_cli ->> 'email', '')),
+                         'endereco', trim(coalesce(v_cli ->> 'endereco', ''))) end,
+    -- Empresa e consultor ficam congelados depois que o orçamento sai de Rascunho.
+    snapshot_empresa   = case when v_status_ant = 'rascunho' or o.snapshot_empresa is null
+                              then empresa_snapshot() else o.snapshot_empresa end,
+    snapshot_consultor = case when v_status_ant = 'rascunho' or o.snapshot_consultor is null or o.vendedor_id <> v_vendedor
+                              then consultor_snapshot(v_vendedor) else o.snapshot_consultor end
+  where o.id = v_id;
+
+  return (
+    select jsonb_build_object(
+      'id', o.id, 'numero', o.numero, 'status', o.status,
+      'situacao', situacao_orcamento(o.status, o.validade),
+      'data', o.data, 'validade', o.validade, 'cliente_id', o.cliente_id, 'modo_calculo', o.modo_calculo,
+      'subtotal_prazo', o.subtotal_prazo, 'subtotal_vista', o.subtotal_vista,
+      'total_prazo', o.total_prazo, 'total_vista', o.total_vista, 'atualizado_em', o.atualizado_em,
+      'itens', coalesce((select jsonb_agg(jsonb_build_object(
+          'id', i.id, 'unit_prazo', i.unit_prazo, 'unit_vista', i.unit_vista,
+          'total_prazo', i.total_prazo, 'total_vista', i.total_vista) order by i.ordem)
+        from orcamento_itens i where i.orcamento_id = o.id), '[]'))
+    from orcamentos o where o.id = v_id
+  );
+end $$;
+
+-- Duplicar: novo número, data de hoje, Rascunho, consultor = quem duplicou.
+create or replace function public.duplicar_orcamento(p_id uuid)
+returns uuid language plpgsql security invoker set search_path = public as $$
+declare
+  o orcamentos;
+  v_novo uuid;
+begin
+  select * into o from orcamentos where id = p_id;
+  if not found then
+    raise exception 'Orçamento não encontrado.' using errcode = 'P0002';
+  end if;
+
+  insert into orcamentos (cliente_id, vendedor_id, arquiteto, modo_calculo, formas_pagamento, forma_outro,
+                          condicoes, observacoes, snapshot_cliente)
+  values (o.cliente_id, auth.uid(), o.arquiteto, o.modo_calculo, o.formas_pagamento, o.forma_outro,
+          o.condicoes, o.observacoes, o.snapshot_cliente)
+  returning id into v_novo;
+
+  insert into orcamento_itens (orcamento_id, ordem, produto_id, marca, nome, referencia, acabamento, unidade,
+                               foto_url, ambiente, qtd, preco_base, pct)
+  select v_novo, ordem, produto_id, marca, nome, referencia, acabamento, unidade, foto_url, ambiente, qtd, preco_base, pct
+  from orcamento_itens where orcamento_id = p_id;
+
+  update orcamentos set
+    desconto = o.desconto, motivo_desconto = o.motivo_desconto,
+    acrescimo = o.acrescimo, motivo_acrescimo = o.motivo_acrescimo,
+    snapshot_empresa = empresa_snapshot(), snapshot_consultor = consultor_snapshot(auth.uid())
+  where id = v_novo;
+  return v_novo;
+end $$;
+
+-- Ao compartilhar: Rascunho vira Enviado e os dados do PDF ficam congelados.
+create or replace function public.marcar_enviado(p_id uuid)
+returns text language plpgsql security invoker set search_path = public as $$
+declare
+  v_status text;
+begin
+  update orcamentos set
+    status = 'enviado',
+    snapshot_empresa = empresa_snapshot(),
+    snapshot_consultor = consultor_snapshot(vendedor_id)
+  where id = p_id and status = 'rascunho';
+  select status into v_status from orcamentos where id = p_id;
+  return v_status;
+end $$;
+
+-- Sugestões de preenchimento (cada um só enxerga o que o RLS permite).
+create or replace function public.arquitetos_usados()
+returns setof text language sql stable security invoker set search_path = public as $$
+  select distinct arquiteto from orcamentos where arquiteto <> '' order by 1 limit 300
+$$;
+
+create or replace function public.marcas_usadas()
+returns setof text language sql stable security invoker set search_path = public as $$
+  select distinct marca from produtos where marca <> '' and ativo order by 1
+$$;
+
+-- ---------------------------------------------------------------------
+-- Arquivos (fotos de produtos e logo). Bucket público para leitura; só
+-- usuários ativos enviam fotos de produto e só admin envia a logo.
+-- Arquivos nunca são sobrescritos nem apagados: orçamentos antigos
+-- continuam apontando para a foto que tinham.
+-- ---------------------------------------------------------------------
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('arquivos', 'arquivos', true, 5242880, array['image/jpeg', 'image/png'])
+on conflict (id) do nothing;
+
+create policy arquivos_enviar_produto on storage.objects for insert to authenticated
+  with check (bucket_id = 'arquivos' and name like 'produtos/%' and public.usuario_ativo());
+create policy arquivos_enviar_logo on storage.objects for insert to authenticated
+  with check (bucket_id = 'arquivos' and name like 'empresa/%' and public.is_admin());
+
 -- Permissões de acesso via API (as regras finas ficam no RLS acima).
 grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on all tables in schema public to authenticated, service_role;
