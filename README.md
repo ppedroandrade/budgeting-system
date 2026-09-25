@@ -15,7 +15,7 @@ Stack: Next.js 16 (App Router) + TypeScript + Tailwind 4 · Supabase (Postgres, 
 | `src/styles/tokens.css` | Cores, fontes e medidas (design tokens) |
 | `src/app/(app)/` | Telas do sistema (painel, vendedores, configurações…) |
 | `src/lib/` | Sessão, Supabase e formatação brasileira |
-| `tests/` | Testes automáticos (`npm test`; banco: `TEST_DATABASE_URL=… npm run test:db`) |
+| `tests/` | Testes automáticos (`npm test`; banco: `TEST_DATABASE_URL=postgres://…/teste npm run test:db — use um banco separado, os testes criam dados`) |
 | `assets/` | Logos originais (branca) e versão escura gerada para fundo claro/PDF |
 
 ## Regras de acesso (garantidas no banco, via RLS)

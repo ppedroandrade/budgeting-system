@@ -43,9 +43,14 @@ const CAMPOS: Record<string, Validador> = {
   condicoes_padrao: texto(2000),
   observacoes_padrao: texto(2000),
   pdf_mostrar_pct: (v) => ({ valor: v === "true" }),
+  logo_url: (v) => {
+    const base = `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/arquivos/empresa/`;
+    if (v && !v.startsWith(base)) return { erro: "Endereço de logo inválido." };
+    return { valor: v };
+  },
 };
 
-export type ResultadoCampo = { ok: true; valor: string } | { ok: false; erro: string };
+import type { ResultadoCampo } from "@/components/ui/CampoAuto";
 
 export async function salvarCampo(campo: string, bruto: string): Promise<ResultadoCampo> {
   await exigirAdmin();
@@ -55,7 +60,8 @@ export async function salvarCampo(campo: string, bruto: string): Promise<Resulta
   if ("erro" in r) return { ok: false, erro: r.erro };
 
   const supabase = await supabaseServidor();
-  const { error } = await supabase.from("empresa").update({ [campo]: r.valor }).eq("id", 1);
+  const valor = campo === "logo_url" && r.valor === "" ? null : r.valor;
+  const { error } = await supabase.from("empresa").update({ [campo]: valor }).eq("id", 1);
   if (error) return { ok: false, erro: "Não foi possível salvar. Verifique a conexão." };
 
   revalidatePath("/configuracoes");

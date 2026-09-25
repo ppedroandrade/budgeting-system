@@ -1,7 +1,15 @@
 "use client";
 
-import { useId, useRef, useState, useTransition } from "react";
+import { useState } from "react";
 import { salvarCampo } from "./actions";
+import { CampoAuto as CampoBase, IndicadorSalvo as Indicador, useAutosave as useAutosaveBase } from "@/components/ui/CampoAuto";
+import { UploadLogo } from "./UploadLogo";
+
+const useAutosave = (campo: keyof Empresa, inicial: string) => useAutosaveBase(salvarCampo, campo, inicial);
+
+function CampoAuto(props: Omit<React.ComponentProps<typeof CampoBase>, "salvarCampo"> & { campo: keyof Empresa }) {
+  return <CampoBase salvarCampo={salvarCampo} {...props} />;
+}
 
 export type Empresa = {
   razao_social: string;
@@ -20,81 +28,6 @@ export type Empresa = {
   observacoes_padrao: string;
   pdf_mostrar_pct: boolean;
 };
-
-type Estado = "parado" | "salvando" | "salvo" | "erro";
-
-/** Salva o campo sozinho ao sair dele (ou ao mudar, em caixas de marcar). */
-function useAutosave(campo: keyof Empresa, inicial: string) {
-  const [estado, setEstado] = useState<Estado>("parado");
-  const [erro, setErro] = useState("");
-  const salvo = useRef(inicial);
-  const [, iniciar] = useTransition();
-
-  function salvar(valor: string, aoSalvar?: (v: string) => void) {
-    if (valor === salvo.current) return;
-    setEstado("salvando");
-    iniciar(async () => {
-      const r = await salvarCampo(campo, valor);
-      if (r.ok) {
-        salvo.current = r.valor;
-        aoSalvar?.(r.valor);
-        setEstado("salvo");
-        setErro("");
-      } else {
-        setEstado("erro");
-        setErro(r.erro);
-      }
-    });
-  }
-  return { estado, erro, salvar, salvo };
-}
-
-function Indicador({ estado, erro }: { estado: Estado; erro: string }) {
-  if (estado === "salvando") return <span className="text-xs text-tinta-suave">Salvando…</span>;
-  if (estado === "salvo") return <span className="text-xs text-sucesso">✓ Salvo</span>;
-  if (estado === "erro") return <span className="text-xs text-perigo">{erro}</span>;
-  return null;
-}
-
-const entrada =
-  "block w-full min-h-12 rounded-[var(--ad-radius-sm)] border border-linha bg-superficie px-3.5 text-base text-tinta focus:border-bronze focus:outline-none";
-
-function CampoAuto({
-  campo,
-  rotulo,
-  inicial,
-  multilinha,
-  ajuda,
-  ...props
-}: {
-  campo: keyof Empresa;
-  rotulo: string;
-  inicial: string;
-  multilinha?: boolean;
-  ajuda?: string;
-} & React.InputHTMLAttributes<HTMLInputElement>) {
-  const id = useId();
-  const [valor, setValor] = useState(inicial);
-  const { estado, erro, salvar } = useAutosave(campo, inicial);
-  const aoSair = () => salvar(valor, setValor);
-
-  return (
-    <div>
-      <div className="mb-1.5 flex items-baseline justify-between gap-3">
-        <label htmlFor={id} className="rotulo">
-          {rotulo}
-        </label>
-        <Indicador estado={estado} erro={erro} />
-      </div>
-      {multilinha ? (
-        <textarea id={id} rows={4} className={`${entrada} py-3 leading-relaxed`} value={valor} onChange={(e) => setValor(e.target.value)} onBlur={aoSair} />
-      ) : (
-        <input id={id} className={entrada} value={valor} onChange={(e) => setValor(e.target.value)} onBlur={aoSair} aria-invalid={estado === "erro"} {...props} />
-      )}
-      {ajuda && <p className="mt-1 text-sm text-tinta-suave">{ajuda}</p>}
-    </div>
-  );
-}
 
 function ModoCalculo({ inicial }: { inicial: "A" | "B" }) {
   const [modo, setModo] = useState(inicial);
@@ -219,7 +152,7 @@ export function FormConfiguracoes({ empresa: e }: { empresa: Empresa }) {
 
       <Secao titulo="Opções do" italico="PDF">
         <MostrarPct inicial={e.pdf_mostrar_pct} />
-        <p className="text-sm text-tinta-suave">Envio da logo pelo sistema: chega na Fase 2, junto com as fotos dos produtos.</p>
+        <UploadLogo inicial={e.logo_url} />
       </Secao>
     </div>
   );

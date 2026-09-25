@@ -5,14 +5,17 @@
 # espera que o executável esteja em $AUTH_BIN com as variáveis em $AUTH_ENV.
 set -euo pipefail
 cd "$(dirname "$0")"
+# Uso: resetar-local.sh [nome-do-banco]   (padrão: postgres; os testes usam "teste")
+DB="${1:-postgres}"
 PSQL="psql -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p 54322 -U postgres"
 
-$PSQL -d template1 -c "drop database if exists postgres with (force)" -c "create database postgres"
-$PSQL -d postgres -f 01-papeis-supabase.sql
+$PSQL -d template1 -c "drop database if exists $DB with (force)" -c "create database $DB"
+$PSQL -d "$DB" -f 01-papeis-supabase.sql
 
 # Migrações do Auth (cria auth.users, auth.uid() etc.)
-( set -a; . "$AUTH_ENV"; set +a; "$AUTH_BIN" migrate )
+( set -a; . "$AUTH_ENV"; set +a
+  DATABASE_URL="postgres://supabase_auth_admin:postgres@127.0.0.1:54322/$DB?sslmode=disable" "$AUTH_BIN" migrate )
 
-$PSQL -d postgres -f 02-storage-simulado.sql
-$PSQL -d postgres -f ../schema.sql
-echo "Banco local recriado."
+$PSQL -d "$DB" -f 02-storage-simulado.sql
+$PSQL -d "$DB" -f ../schema.sql
+echo "Banco local \"$DB\" recriado."
