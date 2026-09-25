@@ -52,7 +52,13 @@ export function apagarRascunhoLocal(id: string | null) {
  */
 export function useSalvamento(
   form: OrcamentoForm,
-  opcoes: { admin: boolean; aoCriar: (r: RespostaServidor) => void; aoSalvar: (r: RespostaServidor) => void },
+  opcoes: {
+    admin: boolean;
+    /** Versão que está no servidor ao abrir (difere de `form` quando um rascunho local foi recuperado). */
+    base: OrcamentoForm;
+    aoCriar: (r: RespostaServidor) => void;
+    aoSalvar: (r: RespostaServidor) => void;
+  },
 ) {
   const [estado, setEstado] = useState<EstadoSalvamento>(form.id ? "salvo" : "ocioso");
   const [mensagem, setMensagem] = useState("");
@@ -144,7 +150,10 @@ export function useSalvamento(
     if (primeira.current) {
       primeira.current = false;
       // Ao abrir um orçamento salvo, o que veio do servidor é a base.
-      if (form.id && !problemaParaSalvar(form)) ultimoEnviado.current = JSON.stringify(paraPayload(form, opcoes.admin));
+      const base = opcoes.base;
+      if (base.id && !problemaParaSalvar(base)) ultimoEnviado.current = JSON.stringify(paraPayload(base, opcoes.admin));
+      // Rascunho recuperado do aparelho: envia já ao servidor.
+      if (form !== base) timer.current = setTimeout(() => void enviarRef.current(), 300);
       return;
     }
     gravarLocal(form);

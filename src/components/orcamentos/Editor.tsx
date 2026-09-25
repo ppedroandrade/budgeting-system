@@ -80,6 +80,7 @@ export default function Editor(props: PropsEditor) {
 
   const { estado, mensagem, salvoEm, salvarAgora } = useSalvamento(form, {
     admin: usuario.admin,
+    base: props.inicial,
     aoCriar: (r) => {
       setForm((f) => ({ ...f, id: r.id, numero: r.numero, cliente: f.cliente ? { ...f.cliente, id: r.cliente_id } : null }));
       window.history.replaceState(null, "", `/orcamentos/${r.id}`);
