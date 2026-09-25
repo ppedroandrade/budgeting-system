@@ -394,7 +394,9 @@ select
   o.total_prazo, o.total_vista,
   o.cliente_id, coalesce(c.nome, o.snapshot_cliente ->> 'nome', '') as cliente_nome,
   o.vendedor_id, u.nome as vendedor_nome,
-  o.atualizado_em
+  o.atualizado_em,
+  coalesce(o.snapshot_cliente ->> 'telefone', c.telefone, '') as cliente_telefone,
+  coalesce(o.snapshot_consultor ->> 'nome', u.nome) as consultor_nome
 from public.orcamentos o
 left join public.clientes c on c.id = o.cliente_id
 left join public.usuarios u on u.id = o.vendedor_id;
