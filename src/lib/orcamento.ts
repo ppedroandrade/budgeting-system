@@ -53,6 +53,9 @@ export type OrcamentoForm = {
   vendedor_id: string;
   cliente: ClienteForm | null;
   arquiteto: string;
+  /** Venda indicada pelo(a) arquiteto(a): gera RT para o admin quando aprovada. */
+  indicacao_arquiteto: boolean;
+  arquiteto_acompanhou: boolean;
   itens: ItemForm[];
   desconto: string;
   motivo_desconto: string;
@@ -90,6 +93,7 @@ export function problemaParaSalvar(f: OrcamentoForm): string | null {
   const { totais } = calcularForm(f);
   if (totais.total_vista < 0n || totais.total_prazo < 0n) return "O desconto é maior que o subtotal do orçamento.";
   if (f.validade < f.data) return "A validade não pode ser antes da data do orçamento.";
+  if (f.indicacao_arquiteto && !f.arquiteto.trim()) return "Informe o nome do(a) arquiteto(a) da indicação.";
   return null;
 }
 
@@ -100,6 +104,8 @@ export function paraPayload(f: OrcamentoForm, admin: boolean) {
     vendedor_id: admin ? f.vendedor_id : undefined,
     cliente: f.cliente?.nome.trim() ? f.cliente : null,
     arquiteto: f.arquiteto,
+    indicacao_arquiteto: f.indicacao_arquiteto,
+    arquiteto_acompanhou: f.indicacao_arquiteto && f.arquiteto_acompanhou,
     validade: f.validade,
     status: f.status,
     desconto: reais(centavos(f.desconto || "0") ?? 0n),
@@ -134,7 +140,7 @@ type LinhaItem = {
 
 export type LinhaOrcamento = {
   id: string; numero: string; data: string; validade: string; status: Status; modo_calculo: Modo; vendedor_id: string;
-  cliente_id: string | null; arquiteto: string; desconto: string; motivo_desconto: string; acrescimo: string;
+  cliente_id: string | null; arquiteto: string; indicacao_arquiteto: boolean; arquiteto_acompanhou: boolean; desconto: string; motivo_desconto: string; acrescimo: string;
   motivo_acrescimo: string; formas_pagamento: FormaPagamento[]; forma_outro: string; condicoes: string; observacoes: string;
   snapshot_cliente: Omit<ClienteForm, "id"> | null; atualizado_em: string;
 };
@@ -154,6 +160,8 @@ export function deBanco(o: LinhaOrcamento, itens: LinhaItem[], precosCatalogo: R
       ? { ...clienteVazio(), ...o.snapshot_cliente, id: o.cliente_id }
       : null,
     arquiteto: o.arquiteto,
+    indicacao_arquiteto: o.indicacao_arquiteto,
+    arquiteto_acompanhou: o.arquiteto_acompanhou,
     itens: itens.map((i) => ({
       id: i.id,
       produto_id: i.produto_id,

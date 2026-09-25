@@ -27,6 +27,7 @@ Faça um passo de cada vez. Leva uns 30 minutos no total.
 3. Abra o arquivo [`supabase/schema.sql`](../supabase/schema.sql) no GitHub, clique no botão **Copy raw file** e cole tudo na tela do Supabase.
 4. Clique em **Run**. Deve aparecer *Success. No rows returned*.
 5. (Opcional) Faça o mesmo com [`supabase/seed-produtos.sql`](../supabase/seed-produtos.sql) para já ter os 10 produtos de exemplo.
+6. (Opcional) E com [`supabase/seed-rt-junho-2026.sql`](../supabase/seed-rt-junho-2026.sql) para já ter a RT de junho/2026 da planilha.
 
 **A4. Fechar o cadastro público** (só o admin cria contas)
 1. Menu **Authentication** → **Sign In / Providers**.
@@ -79,7 +80,8 @@ Abra **Environment Variables** e crie as 3 abaixo, com os valores da etapa A6:
 2. **Configurações**: preencha o **CNPJ**, confira os dados da loja e envie a **logo escura** (o PDF tem fundo branco).
 3. **Vendedores**: cadastre cada vendedor (nome, e-mail, WhatsApp e senha inicial) e passe a senha pessoalmente.
 4. Em **Vendedores**, clique no seu nome para corrigir como ele aparece no PDF (o Supabase usa o começo do e-mail como nome).
-5. Faça um orçamento de teste, gere o PDF e compartilhe com você mesmo.
+5. **RT Arquitetos**: confira o **% padrão de RT** (começa em 5%) e quando a RT pode ser paga. No *Cadastro de arquitetos*, preencha o PIX e o % próprio de quem tiver.
+6. Faça um orçamento de teste, gere o PDF e compartilhe com você mesmo.
 
 ---
 

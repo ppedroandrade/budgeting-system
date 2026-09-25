@@ -5,7 +5,7 @@
 ## Fazer um orçamento (poucos minutos)
 1. Toque em **Novo orçamento**.
 2. **Cliente**: comece a digitar o nome. Se ele já existe, toque no nome. Se não existe, toque em **+ Cadastrar "nome" como cliente novo** e preencha telefone e o que tiver.
-3. **Arquiteto(a)**, se houver.
+3. **Arquiteto(a)**, se houver. Se a venda veio por **indicação** dele(a), toque em **Indicação do arquiteto(a)** e marque se ele(a) acompanhou o cliente na loja.
 4. **+ Adicionar produto** → busque por nome, marca ou referência → toque no produto.
    - Não achou? **+ Cadastrar produto novo** (dá para tirar a foto na hora). Ele vai para o orçamento e fica no catálogo.
 5. Em cada item, preencha **Ambiente** (Cozinha, Banheiro…), **Qtd** (aceita 12,5) e confira o **preço** e o **%**.

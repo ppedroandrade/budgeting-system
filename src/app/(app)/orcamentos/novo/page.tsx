@@ -28,6 +28,8 @@ export default async function NovoOrcamento({ searchParams }: { searchParams: Pr
     vendedor_id: usuario.id,
     cliente,
     arquiteto: "",
+    indicacao_arquiteto: false,
+    arquiteto_acompanhou: false,
     itens: [],
     desconto: "",
     motivo_desconto: "",

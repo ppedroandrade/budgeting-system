@@ -11,6 +11,16 @@ Fases 1 a 4 prontas e testadas; Fase 5 com guias prontos (a publicação em si d
 - **Guia do vendedor (1 página):** [docs/GUIA-VENDEDOR.md](docs/GUIA-VENDEDOR.md).
 - **Exemplo de PDF:** [docs/exemplo-orcamento.pdf](docs/exemplo-orcamento.pdf) (fotos de teste).
 
+### RT de arquitetos (somente admin)
+- No orçamento, o vendedor marca **Indicação do arquiteto(a)** (e se ele acompanhou o cliente). Ao virar **Aprovado**,
+  nasce sozinho um lançamento de RT com valor da compra = total à vista e o % padrão (ou o % próprio do arquiteto).
+- Menu **RT Arquitetos**: lançamentos por mês (mesmas colunas da planilha), pagamentos do cliente (parcelas),
+  pagamentos ao arquiteto, "a pagar por arquiteto" com PIX, cadastro de arquitetos, exportar para Excel.
+- Valor da RT = compra × % — **sempre calculado** (a planilha de junho tinha 1.930 e 11.800 digitados; o correto é
+  1.927,50 e 11.812,00). Regra de liberação configurável: proporcional ao que o cliente pagou, ou só quando quitar.
+- Vendedor nunca vê % ou valores de RT, e nada disso sai no PDF do cliente (garantido no banco, por RLS).
+- `supabase/seed-rt-junho-2026.sql` (opcional) traz os dois lançamentos de junho/2026 da planilha.
+
 ### Decisão pendente
 - **Modo B**: implementado como na regra escrita (preço digitado = à vista; à prazo = vista × (1 + %)).
   O valor esperado da especificação (R$ 22.194,58) corresponde a outra regra (à vista = prazo ÷ 1,20).
@@ -21,6 +31,8 @@ Fases 1 a 4 prontas e testadas; Fase 5 com guias prontos (a publicação em si d
 |---|---|
 | `supabase/schema.sql` | **Arquivo único do banco**: colar no Supabase → SQL Editor → Run |
 | `supabase/seed-produtos.sql` | Os 10 produtos do orçamento do Ali (opcional) |
+| `supabase/seed-rt-junho-2026.sql` | Os lançamentos de RT de junho/2026 da planilha (opcional) |
+| `src/app/(app)/rt/` | Tela de RT dos arquitetos (admin) e exportação para Excel |
 | `supabase/dev/` | Só para testes locais (simula o Supabase num Postgres local) |
 | `src/components/orcamentos/` | Tela única de orçamento, salvamento automático, compartilhar |
 | `src/pdf/` | PDF do orçamento (react-pdf), fontes e logos |

@@ -497,6 +497,9 @@ declare
   v_data        date;
   v_validade    date := nullif(p ->> 'validade', '')::date;
   v_ids         uuid[];
+  v_arq_nome    text := trim(coalesce(p ->> 'arquiteto', ''));
+  v_arq_id      uuid;
+  v_indicacao   boolean := coalesce((p ->> 'indicacao_arquiteto')::boolean, false);
 begin
   if not usuario_ativo() then
     raise exception 'Seu acesso está desativado.' using errcode = 'insufficient_privilege';
@@ -557,6 +560,15 @@ begin
   where it.orcamento_id = excluded.orcamento_id;
 
   -- 4) Cabeçalho, ajustes e cópias para o PDF.
+  -- Arquiteto(a): liga ao cadastro (cria se for novo) — base da RT.
+  if v_arq_nome <> '' then
+    v_arq_id := garantir_arquiteto(v_arq_nome);
+    select nome into v_arq_nome from arquiteto_nome(v_arq_id);
+  end if;
+  if v_indicacao and v_arq_id is null then
+    raise exception 'Informe o nome do(a) arquiteto(a) para marcar a indicação.' using errcode = 'check_violation';
+  end if;
+
   select data into v_data from orcamentos where id = v_id;
   if v_validade is not null and v_validade < v_data then
     raise exception 'A validade não pode ser antes da data do orçamento.' using errcode = 'check_violation';
@@ -565,7 +577,10 @@ begin
   update orcamentos o set
     cliente_id       = v_cli_id,
     vendedor_id      = v_vendedor,
-    arquiteto        = trim(coalesce(p ->> 'arquiteto', '')),
+    arquiteto        = v_arq_nome,
+    arquiteto_id     = v_arq_id,
+    indicacao_arquiteto  = v_indicacao,
+    arquiteto_acompanhou = v_indicacao and coalesce((p ->> 'arquiteto_acompanhou')::boolean, false),
     validade         = coalesce(v_validade, o.validade),
     status           = coalesce(nullif(p ->> 'status', ''), o.status),
     desconto         = coalesce((p ->> 'desconto')::numeric, 0),
@@ -614,10 +629,10 @@ begin
     raise exception 'Orçamento não encontrado.' using errcode = 'P0002';
   end if;
 
-  insert into orcamentos (cliente_id, vendedor_id, arquiteto, modo_calculo, formas_pagamento, forma_outro,
-                          condicoes, observacoes, snapshot_cliente)
-  values (o.cliente_id, auth.uid(), o.arquiteto, o.modo_calculo, o.formas_pagamento, o.forma_outro,
-          o.condicoes, o.observacoes, o.snapshot_cliente)
+  insert into orcamentos (cliente_id, vendedor_id, arquiteto, arquiteto_id, indicacao_arquiteto, arquiteto_acompanhou,
+                          modo_calculo, formas_pagamento, forma_outro, condicoes, observacoes, snapshot_cliente)
+  values (o.cliente_id, auth.uid(), o.arquiteto, o.arquiteto_id, o.indicacao_arquiteto, o.arquiteto_acompanhou,
+          o.modo_calculo, o.formas_pagamento, o.forma_outro, o.condicoes, o.observacoes, o.snapshot_cliente)
   returning id into v_novo;
 
   insert into orcamento_itens (orcamento_id, ordem, produto_id, marca, nome, referencia, acabamento, unidade,
@@ -649,11 +664,6 @@ begin
 end $$;
 
 -- Sugestões de preenchimento (cada um só enxerga o que o RLS permite).
-create or replace function public.arquitetos_usados()
-returns setof text language sql stable security invoker set search_path = public as $$
-  select distinct arquiteto from orcamentos where arquiteto <> '' order by 1 limit 300
-$$;
-
 create or replace function public.marcas_usadas()
 returns setof text language sql stable security invoker set search_path = public as $$
   select distinct marca from produtos where marca <> '' and ativo order by 1
@@ -674,9 +684,238 @@ create policy arquivos_enviar_produto on storage.objects for insert to authentic
 create policy arquivos_enviar_logo on storage.objects for insert to authenticated
   with check (bucket_id = 'arquivos' and name like 'empresa/%' and public.is_admin());
 
+-- =====================================================================
+-- RT (reserva técnica) de arquitetos — SÓ ADMIN. Nunca aparece no PDF.
+--   Orçamento com "Indicação do arquiteto" que vira Aprovado gera um
+--   lançamento de RT. O admin acompanha o que o cliente já pagou (em uma
+--   ou várias parcelas) e registra o que foi pago ao arquiteto.
+--   Valor da RT = valor da compra × % (calculado, nunca digitado).
+-- =====================================================================
+create table public.arquitetos (
+  id           uuid primary key default gen_random_uuid(),
+  nome         text not null check (length(trim(nome)) > 0),
+  telefone     text,
+  email        text,
+  pix          text,            -- chave PIX / dados para pagamento
+  pct_rt       numeric(5,2) check (pct_rt between 0 and 100), -- % próprio (vazio = % padrão)
+  observacoes  text not null default '',
+  ativo        boolean not null default true,
+  criado_por   uuid default auth.uid() references public.usuarios (id),
+  criado_em    timestamptz not null default now(),
+  busca        text generated always as (public.sem_acento(nome)) stored
+);
+create unique index arquitetos_nome_unico on public.arquitetos (public.sem_acento(trim(nome)));
+
+alter table public.orcamentos
+  add column arquiteto_id         uuid references public.arquitetos (id),
+  add column indicacao_arquiteto  boolean not null default false,
+  add column arquiteto_acompanhou boolean not null default false;
+
+create table public.rt_config (
+  id           int primary key default 1 check (id = 1),
+  pct_padrao   numeric(5,2) not null default 5 check (pct_padrao between 0 and 100),
+  -- proporcional: libera a RT conforme o cliente paga; quitado: só quando o cliente paga tudo
+  liberacao    text not null default 'proporcional' check (liberacao in ('proporcional', 'quitado'))
+);
+insert into public.rt_config (id) values (1);
+
+create table public.rt_lancamentos (
+  id             uuid primary key default gen_random_uuid(),
+  orcamento_id   uuid unique references public.orcamentos (id) on delete set null,
+  arquiteto_id   uuid not null references public.arquitetos (id),
+  cliente_nome   text not null default '',
+  mes_ref        date not null default date_trunc('month', public.hoje())::date,  -- "Mês.Ano" da planilha
+  data_pedido    date not null default public.hoje(),
+  nota_fiscal    text not null default '',
+  acompanhou     boolean not null default false,
+  valor_compra   numeric(12,2) not null default 0 check (valor_compra >= 0),
+  pct            numeric(5,2) not null default 5 check (pct between 0 and 100),
+  valor_rt       numeric(12,2) generated always as (round(valor_compra * pct / 100, 2)) stored,
+  cancelado      boolean not null default false, -- orçamento deixou de estar Aprovado
+  ajustado       boolean not null default false, -- admin editou: não sincroniza mais com o orçamento
+  observacoes    text not null default '',
+  criado_em      timestamptz not null default now(),
+  atualizado_em  timestamptz not null default now(),
+  check (mes_ref = date_trunc('month', mes_ref)::date)
+);
+create index rt_lancamentos_mes_idx on public.rt_lancamentos (mes_ref);
+create index rt_lancamentos_arq_idx on public.rt_lancamentos (arquiteto_id);
+create trigger rt_lancamentos_atualizado_em before update on public.rt_lancamentos
+  for each row execute function public.tocar_atualizado_em();
+
+-- Pagamentos do CLIENTE (à vista ou parcelado).
+create table public.rt_recebimentos (
+  id             uuid primary key default gen_random_uuid(),
+  lancamento_id  uuid not null references public.rt_lancamentos (id) on delete cascade,
+  data           date not null default public.hoje(),
+  valor          numeric(12,2) not null check (valor > 0),
+  forma          text not null default '',
+  observacao     text not null default '',
+  criado_em      timestamptz not null default now()
+);
+-- Pagamentos da RT ao ARQUITETO.
+create table public.rt_pagamentos (
+  id             uuid primary key default gen_random_uuid(),
+  lancamento_id  uuid not null references public.rt_lancamentos (id) on delete cascade,
+  data           date not null default public.hoje(),
+  valor          numeric(12,2) not null check (valor > 0),
+  forma          text not null default '',
+  observacao     text not null default '',
+  criado_em      timestamptz not null default now()
+);
+
+-- Cadastra o(a) arquiteto(a) pelo nome (sem duplicar "Mayara" / "mayara ") e devolve o id.
+create or replace function public.garantir_arquiteto(p_nome text)
+returns uuid language plpgsql security definer set search_path = public as $$
+declare
+  v_id uuid;
+  v_nome text := regexp_replace(trim(p_nome), '\s+', ' ', 'g');
+begin
+  if not usuario_ativo() then
+    raise exception 'Seu acesso está desativado.' using errcode = 'insufficient_privilege';
+  end if;
+  if v_nome = '' then return null; end if;
+  select id into v_id from arquitetos where sem_acento(trim(nome)) = sem_acento(v_nome);
+  if v_id is null then
+    insert into arquitetos (nome) values (v_nome)
+    on conflict (public.sem_acento(trim(nome))) do nothing
+    returning id into v_id;
+    if v_id is null then
+      select id into v_id from arquitetos where sem_acento(trim(nome)) = sem_acento(v_nome);
+    end if;
+  end if;
+  return v_id;
+end $$;
+
+create or replace function public.arquiteto_nome(p_id uuid)
+returns table (nome text) language sql stable security definer set search_path = public as $$
+  select nome from arquitetos where id = p_id
+$$;
+
+-- Nomes do cadastro de arquitetos (vendedor vê só o nome; telefone/PIX/% são do admin).
+create or replace function public.arquitetos_usados()
+returns setof text language sql stable security definer set search_path = public as $$
+  select nome from arquitetos where ativo and usuario_ativo() order by nome limit 1000
+$$;
+
+-- Mantém o lançamento de RT em dia com o orçamento.
+create or replace function public.sincronizar_rt()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  v_deve boolean := new.status = 'aprovado' and new.indicacao_arquiteto and new.arquiteto_id is not null;
+  r rt_lancamentos;
+  v_mov boolean;
+  v_pct numeric;
+begin
+  select * into r from rt_lancamentos where orcamento_id = new.id;
+  if v_deve then
+    select coalesce(a.pct_rt, c.pct_padrao) into v_pct from arquitetos a, rt_config c where a.id = new.arquiteto_id;
+    if r.id is null then
+      insert into rt_lancamentos (orcamento_id, arquiteto_id, cliente_nome, acompanhou, valor_compra, pct)
+      values (new.id, new.arquiteto_id, coalesce(new.snapshot_cliente ->> 'nome', ''), new.arquiteto_acompanhou,
+              new.total_vista, coalesce(v_pct, 5));
+    else
+      v_mov := exists (select 1 from rt_recebimentos where lancamento_id = r.id)
+            or exists (select 1 from rt_pagamentos where lancamento_id = r.id);
+      if r.ajustado or v_mov then
+        update rt_lancamentos set cancelado = false where id = r.id and cancelado;
+      else
+        update rt_lancamentos set
+          cancelado = false, arquiteto_id = new.arquiteto_id, acompanhou = new.arquiteto_acompanhou,
+          cliente_nome = coalesce(new.snapshot_cliente ->> 'nome', ''), valor_compra = new.total_vista,
+          pct = case when arquiteto_id = new.arquiteto_id then pct else coalesce(v_pct, pct) end
+        where id = r.id
+          and (cancelado or arquiteto_id <> new.arquiteto_id or acompanhou <> new.arquiteto_acompanhou
+               or valor_compra <> new.total_vista or cliente_nome <> coalesce(new.snapshot_cliente ->> 'nome', ''));
+      end if;
+    end if;
+  elsif r.id is not null and not r.cancelado then
+    update rt_lancamentos set cancelado = true where id = r.id;
+  end if;
+  return null;
+end $$;
+
+create trigger orcamento_rt after insert or update on public.orcamentos
+  for each row execute function public.sincronizar_rt();
+
+-- Não deixa registrar mais do que o devido (erro de digitação).
+create or replace function public.validar_rt_movimento()
+returns trigger language plpgsql as $$
+declare
+  l rt_lancamentos;
+  v_total numeric;
+begin
+  select * into l from rt_lancamentos where id = new.lancamento_id;
+  if tg_table_name = 'rt_recebimentos' then
+    select coalesce(sum(valor), 0) into v_total from rt_recebimentos where lancamento_id = new.lancamento_id and id <> new.id;
+    if v_total + new.valor > l.valor_compra then
+      raise exception 'O total recebido do cliente (R$ %) passaria do valor da compra (R$ %).', v_total + new.valor, l.valor_compra
+        using errcode = 'check_violation';
+    end if;
+  else
+    select coalesce(sum(valor), 0) into v_total from rt_pagamentos where lancamento_id = new.lancamento_id and id <> new.id;
+    if v_total + new.valor > l.valor_rt then
+      raise exception 'O total pago ao arquiteto (R$ %) passaria do valor da RT (R$ %).', v_total + new.valor, l.valor_rt
+        using errcode = 'check_violation';
+    end if;
+  end if;
+  return new;
+end $$;
+
+create trigger rt_recebimento_valida before insert or update on public.rt_recebimentos
+  for each row execute function public.validar_rt_movimento();
+create trigger rt_pagamento_valida before insert or update on public.rt_pagamentos
+  for each row execute function public.validar_rt_movimento();
+
+-- Situação de cada lançamento (o que o cliente pagou, quanto da RT está liberado, saldo a pagar).
+create view public.rt_resumo with (security_invoker = true) as
+with mov as (
+  select l.id,
+    coalesce((select sum(valor) from public.rt_recebimentos r where r.lancamento_id = l.id), 0)::numeric(12,2) as recebido,
+    coalesce((select sum(valor) from public.rt_pagamentos p where p.lancamento_id = l.id), 0)::numeric(12,2) as pago
+  from public.rt_lancamentos l
+), calc as (
+  select l.*, m.recebido, m.pago,
+    (case
+      when l.valor_compra = 0 then 0
+      when c.liberacao = 'quitado' then case when m.recebido >= l.valor_compra then l.valor_rt else 0 end
+      else least(l.valor_rt, round(l.valor_rt * m.recebido / l.valor_compra, 2))
+    end)::numeric(12,2) as rt_liberado
+  from public.rt_lancamentos l join mov m on m.id = l.id cross join public.rt_config c
+)
+select
+  calc.*,
+  greatest(calc.rt_liberado - calc.pago, 0)::numeric(12,2) as saldo_a_pagar,
+  calc.valor_compra - calc.recebido as cliente_falta,
+  case when calc.recebido = 0 then 'aguardando' when calc.recebido < calc.valor_compra then 'parcial' else 'quitado' end
+    as situacao_cliente,
+  case
+    when calc.cancelado then 'cancelado'
+    when calc.valor_rt > 0 and calc.pago >= calc.valor_rt then 'pago'
+    when calc.rt_liberado - calc.pago > 0 then 'a_pagar'
+    else 'aguardando_cliente'
+  end as situacao_rt,
+  a.nome as arquiteto_nome, a.pix as arquiteto_pix, a.telefone as arquiteto_telefone,
+  o.numero as orcamento_numero
+from calc
+join public.arquitetos a on a.id = calc.arquiteto_id
+left join public.orcamentos o on o.id = calc.orcamento_id;
+
+-- Só o admin enxerga e mexe em RT e no cadastro completo de arquitetos.
+alter table public.arquitetos enable row level security;
+alter table public.rt_config enable row level security;
+alter table public.rt_lancamentos enable row level security;
+alter table public.rt_recebimentos enable row level security;
+alter table public.rt_pagamentos enable row level security;
+create policy arquitetos_admin on public.arquitetos for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy rt_config_admin on public.rt_config for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy rt_lancamentos_admin on public.rt_lancamentos for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy rt_recebimentos_admin on public.rt_recebimentos for all to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy rt_pagamentos_admin on public.rt_pagamentos for all to authenticated using (public.is_admin()) with check (public.is_admin());
+
 -- Permissões de acesso via API (as regras finas ficam no RLS acima).
 grant usage on schema public to anon, authenticated, service_role;
 grant select, insert, update, delete on all tables in schema public to authenticated, service_role;
-grant select on public.orcamentos_lista to authenticated, service_role;
+grant select on public.orcamentos_lista, public.rt_resumo to authenticated, service_role;
 revoke all on public.orcamento_contadores from authenticated;
 grant execute on all functions in schema public to authenticated, service_role;

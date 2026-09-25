@@ -6,7 +6,7 @@ import { exigirUsuario } from "@/lib/sessao";
 import { supabaseServidor } from "@/lib/supabase/server";
 
 const COLUNAS =
-  "id, numero, data, validade, status, modo_calculo, vendedor_id, cliente_id, arquiteto, desconto, motivo_desconto, acrescimo, motivo_acrescimo, formas_pagamento, forma_outro, condicoes, observacoes, snapshot_cliente, atualizado_em";
+  "id, numero, data, validade, status, modo_calculo, vendedor_id, cliente_id, arquiteto, indicacao_arquiteto, arquiteto_acompanhou, desconto, motivo_desconto, acrescimo, motivo_acrescimo, formas_pagamento, forma_outro, condicoes, observacoes, snapshot_cliente, atualizado_em";
 
 export default async function EditarOrcamento({ params }: { params: Promise<{ id: string }> }) {
   const usuario = await exigirUsuario();

@@ -413,3 +413,160 @@ d("numeração simultânea", () => {
     }
   });
 });
+
+d("RT de arquitetos", () => {
+  let db: Client;
+  beforeAll(async () => {
+    db = new Client({ connectionString: url });
+    await db.connect();
+  });
+  afterAll(async () => db?.end());
+  beforeEach(async () => db.query("begin"));
+  afterEach(async () => db.query("rollback"));
+
+  async function login(nome: string, perfil = "vendedor") {
+    const id = randomUUID();
+    await db.query("reset role");
+    await db.query("insert into auth.users (id, email, raw_user_meta_data, raw_app_meta_data) values ($1,$2,$3,$4)",
+      [id, `${nome}-${id.slice(0, 6)}@t.com`, { nome }, { perfil }]);
+    if (perfil === "admin") await db.query("update usuarios set perfil = 'admin' where id = $1", [id]);
+    return id;
+  }
+  async function como(id: string) {
+    await db.query("reset role");
+    await db.query("set local role authenticated");
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id })]);
+  }
+  const salvar = async (p: unknown) => (await db.query("select salvar_orcamento($1) as r", [p])).rows[0].r;
+  const item = (preco: string) => ({ id: randomUUID(), nome: "Item", preco_base: preco, qtd: "1", pct: "0", unidade: "un" });
+  const lanc = async (orcId: string) => (await db.query("select * from rt_resumo where orcamento_id = $1", [orcId])).rows[0];
+
+  it("indicação exige o nome do arquiteto(a)", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    await expect(salvar({ indicacao_arquiteto: true, itens: [] })).rejects.toThrow(/nome do\(a\) arquiteto/);
+  });
+
+  it("mesmo arquiteto escrito diferente não duplica o cadastro", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    const a = await salvar({ arquiteto: "Camila Lobato", itens: [] });
+    const b = await salvar({ arquiteto: "  camila   lobato ", itens: [] });
+    await db.query("reset role");
+    const { rows } = await db.query("select arquiteto, arquiteto_id from orcamentos where id in ($1,$2)", [a.id, b.id]);
+    expect(new Set(rows.map((r) => r.arquiteto_id)).size).toBe(1);
+    expect(rows.map((r) => r.arquiteto)).toEqual(["Camila Lobato", "Camila Lobato"]);
+  });
+
+  it("aprovado com indicação gera a RT — valor da planilha calculado certo (11.812,00, não 11.800)", async () => {
+    const adm = await login("Admin", "admin"), fab = await login("Fabiano");
+    await como(fab);
+    const o = await salvar({ arquiteto: "Anderson Szelemel", indicacao_arquiteto: true, cliente: { nome: "Andressa Fernanda" }, itens: [item("236240.00")] });
+    await como(adm);
+    expect(await lanc(o.id)).toBeUndefined(); // ainda não aprovado: sem RT
+    await como(fab);
+    await db.query("update orcamentos set status = 'aprovado' where id = $1", [o.id]);
+    await como(adm);
+    expect(await lanc(o.id)).toMatchObject({
+      valor_compra: "236240.00", pct: "5.00", valor_rt: "11812.00", cliente_nome: "Andressa Fernanda",
+      arquiteto_nome: "Anderson Szelemel", situacao_cliente: "aguardando", situacao_rt: "aguardando_cliente",
+    });
+  });
+
+  it("38.550 × 5% = 1.927,50 (e % próprio do arquiteto vale no lugar do padrão)", async () => {
+    const adm = await login("Admin", "admin"), fab = await login("Fabiano");
+    await como(fab);
+    const o = await salvar({ arquiteto: "Camila Lobato", indicacao_arquiteto: true, arquiteto_acompanhou: true, cliente: { nome: "Pasta Mia" }, itens: [item("38550.00")] });
+    await db.query("update orcamentos set status = 'aprovado' where id = $1", [o.id]);
+    await como(adm);
+    expect(await lanc(o.id)).toMatchObject({ valor_rt: "1927.50", acompanhou: true });
+
+    await db.query("update arquitetos set pct_rt = 10 where nome = 'Camila Lobato'");
+    await como(fab);
+    const o2 = await salvar({ arquiteto: "Camila Lobato", indicacao_arquiteto: true, itens: [item("1000.00")] });
+    await db.query("update orcamentos set status = 'aprovado' where id = $1", [o2.id]);
+    await como(adm);
+    expect(await lanc(o2.id)).toMatchObject({ pct: "10.00", valor_rt: "100.00" });
+  });
+
+  it("cliente parcelado: RT liberada proporcional; pagar ao arquiteto; bloqueios de valor", async () => {
+    const adm = await login("Admin", "admin"), fab = await login("Fabiano");
+    await como(fab);
+    const o = await salvar({ arquiteto: "Anderson", indicacao_arquiteto: true, cliente: { nome: "Andressa" }, itens: [item("236240.00")] });
+    await db.query("update orcamentos set status = 'aprovado' where id = $1", [o.id]);
+    await como(adm);
+    const id = (await lanc(o.id)).id;
+    await db.query("insert into rt_recebimentos (lancamento_id, valor, forma) values ($1, 50000, 'Pix')", [id]);
+    expect(await lanc(o.id)).toMatchObject({ recebido: "50000.00", situacao_cliente: "parcial", rt_liberado: "2500.00", saldo_a_pagar: "2500.00", situacao_rt: "a_pagar", cliente_falta: "186240.00" });
+
+    await db.query("insert into rt_pagamentos (lancamento_id, valor, forma) values ($1, 2500, 'Pix')", [id]);
+    expect(await lanc(o.id)).toMatchObject({ pago: "2500.00", saldo_a_pagar: "0.00", situacao_rt: "aguardando_cliente" });
+
+    await db.query("savepoint s");
+    await expect(db.query("insert into rt_pagamentos (lancamento_id, valor) values ($1, 9312.01)", [id])).rejects.toThrow(/passaria do valor da RT/);
+    await db.query("rollback to savepoint s");
+    await expect(db.query("insert into rt_recebimentos (lancamento_id, valor) values ($1, 186240.01)", [id])).rejects.toThrow(/passaria do valor da compra/);
+    await db.query("rollback to savepoint s");
+
+    await db.query("insert into rt_recebimentos (lancamento_id, valor) values ($1, 186240)", [id]);
+    expect(await lanc(o.id)).toMatchObject({ situacao_cliente: "quitado", rt_liberado: "11812.00", saldo_a_pagar: "9312.00" });
+    await db.query("insert into rt_pagamentos (lancamento_id, valor) values ($1, 9312)", [id]);
+    expect(await lanc(o.id)).toMatchObject({ situacao_rt: "pago", saldo_a_pagar: "0.00" });
+  });
+
+  it("regra 'só quando o cliente quitar' não libera nada com pagamento parcial", async () => {
+    const adm = await login("Admin", "admin"), fab = await login("Fabiano");
+    await como(fab);
+    const o = await salvar({ arquiteto: "Anderson", indicacao_arquiteto: true, itens: [item("1000.00")] });
+    await db.query("update orcamentos set status = 'aprovado' where id = $1", [o.id]);
+    await como(adm);
+    await db.query("update rt_config set liberacao = 'quitado'");
+    const id = (await lanc(o.id)).id;
+    await db.query("insert into rt_recebimentos (lancamento_id, valor) values ($1, 999.99)", [id]);
+    expect(await lanc(o.id)).toMatchObject({ rt_liberado: "0.00", situacao_rt: "aguardando_cliente" });
+    await db.query("insert into rt_recebimentos (lancamento_id, valor) values ($1, 0.01)", [id]);
+    expect(await lanc(o.id)).toMatchObject({ rt_liberado: "50.00", situacao_rt: "a_pagar" });
+  });
+
+  it("acompanha o orçamento: valor muda enquanto não há movimento; sai de Aprovado → cancelado", async () => {
+    const adm = await login("Admin", "admin"), fab = await login("Fabiano");
+    await como(fab);
+    const it1 = item("1000.00");
+    const o = await salvar({ arquiteto: "Anderson", indicacao_arquiteto: true, itens: [it1] });
+    await salvar({ id: o.id, status: "aprovado", arquiteto: "Anderson", indicacao_arquiteto: true, itens: [it1] });
+    await salvar({ id: o.id, status: "aprovado", arquiteto: "Anderson", indicacao_arquiteto: true, itens: [{ ...it1, preco_base: "2000.00" }] });
+    await como(adm);
+    expect(await lanc(o.id)).toMatchObject({ valor_compra: "2000.00", valor_rt: "100.00", cancelado: false });
+
+    await como(fab);
+    await salvar({ id: o.id, status: "perdido", arquiteto: "Anderson", indicacao_arquiteto: true, itens: [it1] });
+    await como(adm);
+    expect(await lanc(o.id)).toMatchObject({ cancelado: true, situacao_rt: "cancelado" });
+
+    await como(fab);
+    await salvar({ id: o.id, status: "aprovado", arquiteto: "Anderson", indicacao_arquiteto: false, itens: [it1] });
+    await como(adm);
+    expect((await lanc(o.id)).cancelado).toBe(true); // tirou a indicação: continua cancelado
+
+    await db.query("update rt_lancamentos set ajustado = true, valor_compra = 1500, cancelado = false where orcamento_id = $1", [o.id]);
+    await como(fab);
+    await salvar({ id: o.id, status: "aprovado", arquiteto: "Anderson", indicacao_arquiteto: true, itens: [{ ...it1, preco_base: "3000.00" }] });
+    await como(adm);
+    expect(await lanc(o.id)).toMatchObject({ valor_compra: "1500.00" }); // ajuste do admin prevalece
+  });
+
+  it("vendedor não enxerga nem mexe em RT, % ou dados de pagamento do arquiteto", async () => {
+    const fab = await login("Fabiano");
+    await como(fab);
+    const o = await salvar({ arquiteto: "Mayara", indicacao_arquiteto: true, itens: [item("100.00")] });
+    await db.query("update orcamentos set status = 'aprovado' where id = $1", [o.id]);
+    for (const t of ["rt_lancamentos", "rt_resumo", "rt_config", "arquitetos", "rt_recebimentos", "rt_pagamentos"]) {
+      expect((await db.query(`select * from ${t}`)).rowCount).toBe(0);
+    }
+    expect((await db.query("select * from arquitetos_usados()")).rows.map((r) => r.arquitetos_usados)).toContain("Mayara");
+    await db.query("savepoint s");
+    await expect(db.query("insert into arquitetos (nome) values ('X')")).rejects.toThrow(/row-level security/);
+    await db.query("rollback to savepoint s");
+    expect((await db.query("update rt_config set pct_padrao = 50")).rowCount).toBe(0);
+  });
+});

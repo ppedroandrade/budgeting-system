@@ -13,6 +13,7 @@ const ADMIN: ItemMenu[] = [
   { href: "/painel", rotulo: "Painel" },
   ...VENDEDOR,
   { href: "/vendedores", rotulo: "Vendedores" },
+  { href: "/rt", rotulo: "RT Arquitetos" },
   { href: "/configuracoes", rotulo: "Configurações" },
 ];
 

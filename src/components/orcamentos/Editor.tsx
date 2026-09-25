@@ -320,6 +320,38 @@ export default function Editor(props: PropsEditor) {
                 </datalist>
               </div>
             </div>
+
+            <div className="mt-5 border-t border-linha pt-5">
+              <button
+                type="button"
+                aria-pressed={form.indicacao_arquiteto}
+                onClick={() => muda("indicacao_arquiteto", !form.indicacao_arquiteto)}
+                className={`flex min-h-12 w-full items-center justify-center gap-2 rounded-ad border px-5 text-[0.8125rem] tracking-[0.16em] uppercase transition-colors sm:w-auto ${
+                  form.indicacao_arquiteto ? "border-bronze bg-bronze text-white" : "border-bronze/60 text-bronze hover:bg-bronze/5"
+                }`}
+              >
+                {form.indicacao_arquiteto ? "✓ Indicação do arquiteto(a)" : "Indicação do arquiteto(a)"}
+              </button>
+              {form.indicacao_arquiteto && (
+                <div className="mt-3 space-y-2">
+                  {!form.arquiteto.trim() && (
+                    <p role="alert" className="text-sm text-perigo">
+                      Informe o nome do(a) arquiteto(a) acima.
+                    </p>
+                  )}
+                  <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm">
+                    <input
+                      type="checkbox"
+                      className="size-5 accent-[var(--ad-accent)]"
+                      checked={form.arquiteto_acompanhou}
+                      onChange={(e) => muda("arquiteto_acompanhou", e.target.checked)}
+                    />
+                    O(a) arquiteto(a) acompanhou o cliente na loja
+                  </label>
+                  <p className="text-sm text-tinta-suave">Quando o orçamento for aprovado, a indicação vai para o controle de RT do administrador.</p>
+                </div>
+              )}
+            </div>
           </Secao>
 
           {/* d) Itens */}
