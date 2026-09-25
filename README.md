@@ -50,8 +50,9 @@ Fases 1 a 4 prontas e testadas; Fase 5 com guias prontos (a publicação em si d
 - Vendedor desativado não consegue entrar e não enxerga nada; o histórico é mantido.
 
 ## Rodar localmente
+Passo a passo para quem não é desenvolvedor: [docs/RODAR-LOCAL.md](docs/RODAR-LOCAL.md). Resumo:
 ```bash
-cp .env.example .env.local   # preencher com as chaves do Supabase
+cp .env.example .env.local   # preencher com as chaves do Supabase (projeto com o schema.sql aplicado)
 npm install
-npm run dev
+npm run dev                  # http://localhost:3000
 ```
